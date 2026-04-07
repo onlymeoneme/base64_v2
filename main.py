@@ -1,5 +1,6 @@
 import requests
 import base64
+import json
 
 # Список URL-адресов на raw-файлы в GitHub
 SOURCES = [
@@ -63,7 +64,6 @@ SOURCES = [
     "https://raw.githubusercontent.com/F0rc3Run/F0rc3Run/refs/heads/main/splitted-by-protocol/vless.txt",
     "https://raw.githubusercontent.com/F0rc3Run/F0rc3Run/refs/heads/main/splitted-by-protocol/trojan.txt",
     "https://raw.githubusercontent.com/F0rc3Run/F0rc3Run/refs/heads/main/splitted-by-protocol/shadowsocks.txt"
-    # Добавьте свои ссылки сюда
 ]
 
 # Поддерживаемые протоколы
@@ -76,25 +76,44 @@ LABEL = "V Team"
 
 def strip_label(config: str) -> str:
     """
-    Удаляет оригинальный лейбл после # и заменяет на LABEL.
-    Корректно обрабатывает множественные # в оригинале.
+    Удаляет оригинальный лейбл и заменяет на LABEL.
+    Корректно обрабатывает vmess (через JSON) и обычные протоколы (отрезая хвост после #).
     """
-    if '#' in config:
-        return config[:config.index('#')] + f'#{LABEL}'
-    return config + f'#{LABEL}'
+    if config.startswith("vmess://"):
+        try:
+            # Извлекаем base64 строку (всё после vmess://)
+            base64_data = config[8:]
+            # Восстанавливаем паддинг, если он был утерян
+            padded = base64_data + '=' * (-len(base64_data) % 4)
+            # Декодируем и парсим JSON
+            json_data = base64.b64decode(padded).decode('utf-8', errors='ignore')
+            config_dict = json.loads(json_data)
+            
+            # Меняем название сервера (ключ 'ps')
+            config_dict['ps'] = LABEL
+            
+            # Собираем обратно без лишних пробелов для экономии места
+            new_json = json.dumps(config_dict, separators=(',', ':'))
+            new_base64 = base64.b64encode(new_json.encode('utf-8')).decode('utf-8')
+            return f"vmess://{new_base64}"
+        except Exception:
+            # Если vmess повреждён или нестандартный, оставляем как есть
+            return config
+    else:
+        # Для остальных протоколов отрезаем всё после ПОСЛЕДНЕГО '#'
+        base_config = config.rsplit('#', 1)[0]
+        return f"{base_config}#{LABEL}"
 
 
 def parse_content(content):
     """
-    Обрабатывает контент источника: и plain-text, и base64, и смешанный формат.
-    Каждая строка обрабатывается индивидуально.
+    Построчно обрабатывает контент: и plain-text, и base64.
     """
     result = []
 
     for line in content.splitlines():
         line = line.strip()
 
-        # Пропускаем пустые строки и комментарии (включая #profile-title и т.д.)
         if not line or line.startswith('#'):
             continue
 
@@ -108,14 +127,14 @@ def parse_content(content):
             padded = line + '=' * (-len(line) % 4)
             decoded = base64.b64decode(padded).decode('utf-8', errors='ignore')
 
-            # Проверяем что внутри есть конфиги
+            # Проверяем, появились ли протоколы после декодирования
             if any(p in decoded for p in PROTOCOLS):
                 for decoded_line in decoded.splitlines():
                     decoded_line = decoded_line.strip()
                     if decoded_line and any(decoded_line.startswith(p) for p in PROTOCOLS):
                         result.append(strip_label(decoded_line))
         except Exception:
-            # Не base64 и не конфиг — пропускаем
+            # Не base64 и не конфиг — просто пропускаем
             pass
 
     return result
@@ -146,7 +165,7 @@ def get_v2ray_sources():
             fail_count += 1
             print(f"[{i}/{len(SOURCES)}] ✗ {short}: {e}")
 
-    # Убираем дубликаты с сохранением порядка
+    # Дедупликация (удаление повторяющихся серверов с сохранением порядка)
     seen = set()
     unique_configs = []
     for c in final_config_list:
@@ -154,13 +173,13 @@ def get_v2ray_sources():
             seen.add(c)
             unique_configs.append(c)
 
+    # Вывод статистики в консоль
     print(f"\n{'='*50}")
     print(f"Источников успешно: {success_count} / {len(SOURCES)}")
     print(f"Источников с ошибкой: {fail_count}")
-    print(f"Всего конфигов (с дублями): {len(final_config_list)}")
-    print(f"Уникальных конфигов: {len(unique_configs)}")
+    print(f"Всего конфигов (до дедупликации): {len(final_config_list)}")
+    print(f"Уникальных конфигов (после):    {len(unique_configs)}")
 
-    # Статистика по протоколам
     print(f"\nСтатистика по протоколам:")
     for p in PROTOCOLS:
         count = sum(1 for c in unique_configs if c.startswith(p))
@@ -179,11 +198,11 @@ def main():
         print("Ошибка: не удалось собрать ни одного конфига!")
         return
 
-    # Кодируем финальный список в Base64
+    # Кодируем финальный объединённый список обратно в Base64 (формат подписки)
     output_bytes = base64.b64encode(content.encode('utf-8'))
     output_str = output_bytes.decode('utf-8')
 
-    # Сохраняем результат в файл
+    # Сохраняем в файл
     output_file = 'sub.txt'
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(output_str)
