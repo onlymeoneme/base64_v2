@@ -1,4 +1,4 @@
-name: Update V2Ray Subscriptions V2
+name: V2Ray
 
 on:
   schedule:
@@ -23,7 +23,18 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install requests cryptography
+
+      # Восстанавливаем ключ из GitHub Secret перед запуском скрипта.
+      # Как создать секрет:
+      #   1. Запусти скрипт локально один раз — появится secret.key.b64
+      #   2. Скопируй содержимое secret.key.b64
+      #   3. GitHub репо → Settings → Secrets → Actions → New secret
+      #      Name: AES_SECRET_KEY
+      #      Value: <содержимое secret.key.b64>
+      - name: Restore encryption key
+        run: |
+          echo "${{ secrets.AES_SECRET_KEY }}" | base64 -d > secret.key
 
       - name: Run scraper
         run: python main.py
