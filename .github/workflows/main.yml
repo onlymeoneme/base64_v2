@@ -1,4 +1,4 @@
-name: V2Ray
+name: Update V2Ray Subscriptions V2
 
 on:
   schedule:
@@ -25,16 +25,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests cryptography
 
-      # Восстанавливаем ключ из GitHub Secret перед запуском скрипта.
-      # Как создать секрет:
-      #   1. Запусти скрипт локально один раз — появится secret.key.b64
+      # Восстанавливаем ключ из GitHub Secret.
+      # Используем printf вместо echo — echo добавляет \n в конец,
+      # что ломает бинарный ключ и вызывает ValueError в AESGCM.
+      # Как добавить секрет:
+      #   1. Запусти main.py локально — появится secret.key.b64
       #   2. Скопируй содержимое secret.key.b64
       #   3. GitHub репо → Settings → Secrets → Actions → New secret
-      #      Name: AES_SECRET_KEY
+      #      Name:  AES_SECRET_KEY
       #      Value: <содержимое secret.key.b64>
       - name: Restore encryption key
         run: |
-          echo "${{ secrets.AES_SECRET_KEY }}" | base64 -d > secret.key
+          printf '%s' "${{ secrets.AES_SECRET_KEY }}" | base64 -d > secret.key
 
       - name: Run scraper
         run: python main.py
