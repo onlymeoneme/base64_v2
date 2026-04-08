@@ -183,39 +183,57 @@ def split_into_chunks(configs):
 def load_or_create_key() -> bytes:
     """
     Загружает ключ из KEY_FILE или создаёт новый 32-байтовый ключ.
-    Ключ сохраняется в бинарном виде — 32 сырых байта.
+    Автоматически исправляет повреждённый ключ (лишние \\n от echo в CI).
+    Если файл содержит base64-строку вместо бинарного ключа — декодирует.
     """
     if os.path.exists(KEY_FILE):
         with open(KEY_FILE, 'rb') as f:
-            key = f.read()
-        print(f"🔑 Ключ загружен из {KEY_FILE}")
-    else:
-        key = AESGCM.generate_key(bit_length=256)  # 32 байта
-        with open(KEY_FILE, 'wb') as f:
-            f.write(key)
-        # Дополнительно сохраняем base64-версию — удобно для вставки в Android
-        key_b64 = base64.b64encode(key).decode('utf-8')
-        with open(KEY_FILE + ".b64", 'w') as f:
-            f.write(key_b64)
-        print(f"🔑 Новый ключ создан и сохранён в {KEY_FILE}")
-        print(f"   Base64 для Android: {key_b64}")
+            raw = f.read().strip()  # убираем лишние \n (проблема echo в workflow)
+
+        # Вариант 1: бинарный ключ ровно 32 байта
+        if len(raw) == 32:
+            print(f"🔑 Ключ загружен из {KEY_FILE} ({len(raw)} байт)")
+            return raw
+
+        # Вариант 2: ключ сохранён как base64-строка
+        try:
+            decoded = base64.b64decode(raw)
+            if len(decoded) == 32:
+                print(f"🔑 Ключ загружен из {KEY_FILE} (base64 → {len(decoded)} байт)")
+                return decoded
+        except Exception:
+            pass
+
+        # Ключ повреждён — создаём заново
+        print(f"⚠ Ключ повреждён ({len(raw)} байт вместо 32), создаём новый...")
+        os.remove(KEY_FILE)
+
+    # Создаём новый ключ
+    key = AESGCM.generate_key(bit_length=256)  # ровно 32 байта
+    with open(KEY_FILE, 'wb') as f:
+        f.write(key)
+
+    key_b64 = base64.b64encode(key).decode('utf-8')
+    with open(KEY_FILE + ".b64", 'w') as f:
+        f.write(key_b64)
+
+    print(f"🔑 Новый ключ создан: {KEY_FILE}")
+    print(f"   Base64 для GitHub Secret / Android: {key_b64}")
     return key
 
 
 def encrypt_aes_gcm(data: bytes, key: bytes) -> bytes:
     """
-    Шифрует данные AES-256-GCM.
-    Формат результата: [12 байт nonce][зашифрованные данные + 16 байт GCM-тег]
-    Android читает именно этот формат через javax.crypto.
+    Формат: [12 байт nonce] + [ciphertext + 16 байт GCM-тег]
+    Android читает этот формат через javax.crypto напрямую.
     """
     aesgcm = AESGCM(key)
-    nonce = os.urandom(12)          # случайный nonce на каждый файл
+    nonce = os.urandom(12)
     ciphertext = aesgcm.encrypt(nonce, data, None)
-    return nonce + ciphertext       # nonce прибит спереди
+    return nonce + ciphertext
 
 
 def decrypt_aes_gcm(data: bytes, key: bytes) -> bytes:
-    """Расшифровывает данные зашифрованные encrypt_aes_gcm."""
     aesgcm = AESGCM(key)
     nonce      = data[:12]
     ciphertext = data[12:]
@@ -288,8 +306,8 @@ def main():
     print(f"\n{'='*50}")
     print(f"Готово! Сохранено файлов: {len(saved)}")
     if ENCRYPT:
-        print(f"Бинарный ключ: {KEY_FILE}")
-        print(f"Base64 ключ для Android: {KEY_FILE}.b64")
+        print(f"Бинарный ключ:           {KEY_FILE}")
+        print(f"Base64 для Android:      {KEY_FILE}.b64")
     print(f"{'='*50}")
 
 
@@ -303,7 +321,11 @@ def decrypt_file(filepath: str, key_path: str = KEY_FILE):
     Использование: decrypt_file("output/sub_01.enc")
     """
     with open(key_path, 'rb') as f:
-        key = f.read()
+        raw = f.read().strip()
+    try:
+        key = base64.b64decode(raw) if len(raw) != 32 else raw
+    except Exception:
+        key = raw
 
     with open(filepath, 'rb') as f:
         enc_data = f.read()
