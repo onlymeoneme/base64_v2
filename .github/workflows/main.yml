@@ -1,4 +1,4 @@
-name: Update V2Ray Subscriptions V2
+name: V2Ray
 
 on:
   schedule:
