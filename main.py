@@ -1,30 +1,19 @@
 import requests
 import base64
 import os
-
-# pip install cryptography
-try:
-    from cryptography.fernet import Fernet
-    CRYPTO_AVAILABLE = True
-except ImportError:
-    Fernet = None
-    CRYPTO_AVAILABLE = False
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # ─────────────────────────────────────────────
 # НАСТРОЙКИ
 # ─────────────────────────────────────────────
 
-# Целевой диапазон размера итоговых base64-файлов (байты)
-MIN_FILE_SIZE  = 200 * 1024   # 200 KB
-MAX_FILE_SIZE  = 625 * 1024   # 625 KB
-TARGET_FILE_SIZE = 400 * 1024 # ~400 KB — середина диапазона
+MIN_FILE_SIZE    = 200 * 1024   # 200 KB
+MAX_FILE_SIZE    = 625 * 1024   # 625 KB
+TARGET_FILE_SIZE = 400 * 1024   # ~400 KB — цель
 
-# Включить шифрование Fernet?
-ENCRYPT = False  # True / False
-
-# Папка для результата
+ENCRYPT    = True         # True = шифровать, False = только base64
 OUTPUT_DIR = "output"
-KEY_FILE   = "secret.key"   # только при ENCRYPT = True
+KEY_FILE   = "secret.key" # 32 байта, AES-256
 
 # ─────────────────────────────────────────────
 # ИСТОЧНИКИ
@@ -145,7 +134,6 @@ def get_v2ray_sources():
             fail_count += 1
             print(f"[{i}/{len(SOURCES)}] ✗ {short}: {e}")
 
-    # Дедупликация с сохранением порядка
     unique_configs = list(dict.fromkeys(final_config_list))
 
     print(f"\n{'='*50}")
@@ -168,20 +156,13 @@ def get_v2ray_sources():
 # ─────────────────────────────────────────────
 
 def split_into_chunks(configs):
-    """
-    Разбивает список конфигов на чанки так, чтобы каждый
-    base64-файл весил TARGET_FILE_SIZE байт (~400 KB).
-    base64 раздувает данные в 4/3 раза, поэтому лимит сырого
-    текста = TARGET_FILE_SIZE * 3 / 4.
-    """
     raw_target = int(TARGET_FILE_SIZE * 3 / 4)
-
     chunks = []
     current_chunk = []
     current_size = 0
 
     for config in configs:
-        line_size = len(config.encode('utf-8')) + 1  # +1 на '\n'
+        line_size = len(config.encode('utf-8')) + 1
         if current_size + line_size > raw_target and current_chunk:
             chunks.append(current_chunk)
             current_chunk = []
@@ -196,38 +177,58 @@ def split_into_chunks(configs):
 
 
 # ─────────────────────────────────────────────
-# ШИФРОВАНИЕ (Fernet = AES-128-CBC + HMAC-SHA256)
+# AES-256-GCM (совместимо с Android javax.crypto)
 # ─────────────────────────────────────────────
 
-def load_or_create_key():
+def load_or_create_key() -> bytes:
+    """
+    Загружает ключ из KEY_FILE или создаёт новый 32-байтовый ключ.
+    Ключ сохраняется в бинарном виде — 32 сырых байта.
+    """
     if os.path.exists(KEY_FILE):
         with open(KEY_FILE, 'rb') as f:
             key = f.read()
         print(f"🔑 Ключ загружен из {KEY_FILE}")
     else:
-        key = Fernet.generate_key()
+        key = AESGCM.generate_key(bit_length=256)  # 32 байта
         with open(KEY_FILE, 'wb') as f:
             f.write(key)
+        # Дополнительно сохраняем base64-версию — удобно для вставки в Android
+        key_b64 = base64.b64encode(key).decode('utf-8')
+        with open(KEY_FILE + ".b64", 'w') as f:
+            f.write(key_b64)
         print(f"🔑 Новый ключ создан и сохранён в {KEY_FILE}")
+        print(f"   Base64 для Android: {key_b64}")
     return key
 
 
-def encrypt_data(data: bytes, fernet) -> bytes:
-    return fernet.encrypt(data)
+def encrypt_aes_gcm(data: bytes, key: bytes) -> bytes:
+    """
+    Шифрует данные AES-256-GCM.
+    Формат результата: [12 байт nonce][зашифрованные данные + 16 байт GCM-тег]
+    Android читает именно этот формат через javax.crypto.
+    """
+    aesgcm = AESGCM(key)
+    nonce = os.urandom(12)          # случайный nonce на каждый файл
+    ciphertext = aesgcm.encrypt(nonce, data, None)
+    return nonce + ciphertext       # nonce прибит спереди
 
 
-def decrypt_data(data: bytes, fernet) -> bytes:
-    return fernet.decrypt(data)
+def decrypt_aes_gcm(data: bytes, key: bytes) -> bytes:
+    """Расшифровывает данные зашифрованные encrypt_aes_gcm."""
+    aesgcm = AESGCM(key)
+    nonce      = data[:12]
+    ciphertext = data[12:]
+    return aesgcm.decrypt(nonce, ciphertext, None)
 
 
 # ─────────────────────────────────────────────
 # СОХРАНЕНИЕ ФАЙЛОВ
 # ─────────────────────────────────────────────
 
-def save_chunks(chunks, fernet=None):
+def save_chunks(chunks, key: bytes = None):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    total_files = len(chunks)
-    pad = len(str(total_files))
+    pad = len(str(len(chunks)))
     saved_files = []
 
     for idx, chunk in enumerate(chunks, 1):
@@ -237,9 +238,9 @@ def save_chunks(chunks, fernet=None):
         # Шаг 1: base64
         b64_bytes = base64.b64encode(raw_bytes)
 
-        # Шаг 2 (опционально): шифрование
-        if fernet:
-            final_bytes = encrypt_data(b64_bytes, fernet)
+        # Шаг 2: AES-256-GCM шифрование (если включено)
+        if key is not None:
+            final_bytes = encrypt_aes_gcm(b64_bytes, key)
             ext = ".enc"
         else:
             final_bytes = b64_bytes
@@ -264,11 +265,6 @@ def save_chunks(chunks, fernet=None):
 # ─────────────────────────────────────────────
 
 def main():
-    if ENCRYPT and not CRYPTO_AVAILABLE:
-        print("❌ Шифрование включено, но библиотека не установлена.")
-        print("   Запусти: pip install cryptography")
-        return
-
     print("Начинаем сбор конфигов...\n")
     configs = get_v2ray_sources()
 
@@ -280,20 +276,20 @@ def main():
     print(f"Разбивка: {len(configs)} конфигов → {len(chunks)} файлов")
     print(f"Диапазон: {MIN_FILE_SIZE//1024}–{MAX_FILE_SIZE//1024} KB, цель ~{TARGET_FILE_SIZE//1024} KB\n")
 
-    fernet = None
+    key = None
     if ENCRYPT:
         key = load_or_create_key()
-        fernet = Fernet(key)
-        print("🔒 Шифрование включено (Fernet / AES-128-CBC)\n")
+        print("🔒 Шифрование: AES-256-GCM (совместимо с Android)\n")
         print("   ⚠  Не теряй secret.key — без него расшифровать невозможно!\n")
 
     print(f"Сохраняем в папку '{OUTPUT_DIR}/':")
-    saved = save_chunks(chunks, fernet=fernet)
+    saved = save_chunks(chunks, key=key)
 
     print(f"\n{'='*50}")
     print(f"Готово! Сохранено файлов: {len(saved)}")
     if ENCRYPT:
-        print(f"Ключ для расшифровки: {KEY_FILE}")
+        print(f"Бинарный ключ: {KEY_FILE}")
+        print(f"Base64 ключ для Android: {KEY_FILE}.b64")
     print(f"{'='*50}")
 
 
@@ -303,21 +299,16 @@ def main():
 
 def decrypt_file(filepath: str, key_path: str = KEY_FILE):
     """
-    Расшифровывает и выводит содержимое .enc файла.
+    Расшифровывает .enc файл и печатает конфиги.
     Использование: decrypt_file("output/sub_01.enc")
     """
-    if not CRYPTO_AVAILABLE:
-        print("❌ pip install cryptography")
-        return
-
     with open(key_path, 'rb') as f:
         key = f.read()
-    fernet = Fernet(key)
 
     with open(filepath, 'rb') as f:
         enc_data = f.read()
 
-    b64_data = decrypt_data(enc_data, fernet)
+    b64_data = decrypt_aes_gcm(enc_data, key)
     raw_text = base64.b64decode(b64_data).decode('utf-8')
     print(raw_text)
 
