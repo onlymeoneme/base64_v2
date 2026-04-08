@@ -1,13 +1,13 @@
 import requests
 import base64
 import os
-import math
 
 # pip install cryptography
 try:
     from cryptography.fernet import Fernet
     CRYPTO_AVAILABLE = True
 except ImportError:
+    Fernet = None
     CRYPTO_AVAILABLE = False
 
 # ─────────────────────────────────────────────
@@ -15,9 +15,9 @@ except ImportError:
 # ─────────────────────────────────────────────
 
 # Целевой диапазон размера итоговых base64-файлов (байты)
-MIN_FILE_SIZE = 200 * 1024   # 200 KB
-MAX_FILE_SIZE = 625 * 1024   # 625 KB
-TARGET_FILE_SIZE = 400 * 1024  # ~400 KB — середина диапазона
+MIN_FILE_SIZE  = 200 * 1024   # 200 KB
+MAX_FILE_SIZE  = 625 * 1024   # 625 KB
+TARGET_FILE_SIZE = 400 * 1024 # ~400 KB — середина диапазона
 
 # Включить шифрование Fernet?
 ENCRYPT = False  # True / False
@@ -90,7 +90,7 @@ SOURCES = [
     "https://raw.githubusercontent.com/F0rc3Run/F0rc3Run/refs/heads/main/splitted-by-protocol/vmess.txt",
     "https://raw.githubusercontent.com/F0rc3Run/F0rc3Run/refs/heads/main/splitted-by-protocol/vless.txt",
     "https://raw.githubusercontent.com/F0rc3Run/F0rc3Run/refs/heads/main/splitted-by-protocol/trojan.txt",
-    "https://raw.githubusercontent.com/F0rc3Run/F0rc3Run/refs/heads/main/splitted-by-protocol/shadowsocks.txt"
+    "https://raw.githubusercontent.com/F0rc3Run/F0rc3Run/refs/heads/main/splitted-by-protocol/shadowsocks.txt",
 ]
 
 PROTOCOLS = ["vmess://", "vless://", "trojan://", "ss://", "ssr://",
@@ -145,7 +145,8 @@ def get_v2ray_sources():
             fail_count += 1
             print(f"[{i}/{len(SOURCES)}] ✗ {short}: {e}")
 
-    unique_configs = list(dict.fromkeys(final_config_list))  # дедупликация с сохранением порядка
+    # Дедупликация с сохранением порядка
+    unique_configs = list(dict.fromkeys(final_config_list))
 
     print(f"\n{'='*50}")
     print(f"Источников успешно: {success_count} / {len(SOURCES)}")
@@ -169,19 +170,18 @@ def get_v2ray_sources():
 def split_into_chunks(configs):
     """
     Разбивает список конфигов на чанки так, чтобы каждый
-    base64-файл весил TARGET_FILE_SIZE байт (≈400 KB).
-
+    base64-файл весил TARGET_FILE_SIZE байт (~400 KB).
     base64 раздувает данные в 4/3 раза, поэтому лимит сырого
     текста = TARGET_FILE_SIZE * 3 / 4.
     """
-    raw_target = int(TARGET_FILE_SIZE * 3 / 4)  # ~300 KB сырого текста
+    raw_target = int(TARGET_FILE_SIZE * 3 / 4)
 
     chunks = []
     current_chunk = []
     current_size = 0
 
     for config in configs:
-        line_size = len(config.encode('utf-8')) + 1  # +1 байт на '\n'
+        line_size = len(config.encode('utf-8')) + 1  # +1 на '\n'
         if current_size + line_size > raw_target and current_chunk:
             chunks.append(current_chunk)
             current_chunk = []
@@ -200,7 +200,6 @@ def split_into_chunks(configs):
 # ─────────────────────────────────────────────
 
 def load_or_create_key():
-    """Загружает существующий ключ или создаёт новый."""
     if os.path.exists(KEY_FILE):
         with open(KEY_FILE, 'rb') as f:
             key = f.read()
@@ -213,13 +212,11 @@ def load_or_create_key():
     return key
 
 
-def encrypt_data(data: bytes, fernet: Fernet) -> bytes:
-    """Шифрует байты через Fernet."""
+def encrypt_data(data: bytes, fernet) -> bytes:
     return fernet.encrypt(data)
 
 
-def decrypt_data(data: bytes, fernet: Fernet) -> bytes:
-    """Расшифровывает байты через Fernet."""
+def decrypt_data(data: bytes, fernet) -> bytes:
     return fernet.decrypt(data)
 
 
@@ -231,11 +228,10 @@ def save_chunks(chunks, fernet=None):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     total_files = len(chunks)
     pad = len(str(total_files))
-
     saved_files = []
 
     for idx, chunk in enumerate(chunks, 1):
-        raw_text = '\n'.join(chunk)
+        raw_text  = '\n'.join(chunk)
         raw_bytes = raw_text.encode('utf-8')
 
         # Шаг 1: base64
@@ -268,7 +264,6 @@ def save_chunks(chunks, fernet=None):
 # ─────────────────────────────────────────────
 
 def main():
-    # Проверка зависимостей
     if ENCRYPT and not CRYPTO_AVAILABLE:
         print("❌ Шифрование включено, но библиотека не установлена.")
         print("   Запусти: pip install cryptography")
@@ -281,21 +276,17 @@ def main():
         print("Ошибка: не удалось собрать ни одного конфига!")
         return
 
-    # Разбивка
     chunks = split_into_chunks(configs)
-    estimated_files = len(chunks)
-    print(f"Разбивка: {len(configs)} конфигов → {estimated_files} файлов")
+    print(f"Разбивка: {len(configs)} конфигов → {len(chunks)} файлов")
     print(f"Диапазон: {MIN_FILE_SIZE//1024}–{MAX_FILE_SIZE//1024} KB, цель ~{TARGET_FILE_SIZE//1024} KB\n")
 
-    # Шифрование
     fernet = None
     if ENCRYPT:
         key = load_or_create_key()
         fernet = Fernet(key)
-        print(f"🔒 Шифрование включено (Fernet / AES-128-CBC)\n")
+        print("🔒 Шифрование включено (Fernet / AES-128-CBC)\n")
         print("   ⚠  Не теряй secret.key — без него расшифровать невозможно!\n")
 
-    # Сохранение
     print(f"Сохраняем в папку '{OUTPUT_DIR}/':")
     saved = save_chunks(chunks, fernet=fernet)
 
@@ -315,6 +306,10 @@ def decrypt_file(filepath: str, key_path: str = KEY_FILE):
     Расшифровывает и выводит содержимое .enc файла.
     Использование: decrypt_file("output/sub_01.enc")
     """
+    if not CRYPTO_AVAILABLE:
+        print("❌ pip install cryptography")
+        return
+
     with open(key_path, 'rb') as f:
         key = f.read()
     fernet = Fernet(key)
